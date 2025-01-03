@@ -69,7 +69,7 @@ for dataset_name in "${DATASETS[@]}"; do
     echo "Downloading $dataset_name"
 
     # Execute gsutil command
-    ~/miniconda3/envs/rdt-data/bin/gsutil -m cp -n -r -D "gs://gresearch/robotics/$dataset_name" ../datasets/openx_embod/
+    ~/aloha_rdt_data/bin/gsutil -m cp -n -r -D "gs://gresearch/robotics/$dataset_name" ../datasets/openx_embod/
     
     # Check if the resulting directory exists
     directory_path="../datasets/openx_embod/$dataset_name"

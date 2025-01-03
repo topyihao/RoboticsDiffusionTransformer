@@ -1,3 +1,7 @@
+import collections
+collections.Mapping = collections.abc.Mapping
+collections.MutableMapping = collections.abc.MutableMapping
+
 import os
 
 import numpy as np
