@@ -37,6 +37,9 @@ import logging
 from datetime import datetime
 import os
 
+import message_filters
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+
 # sys.path.append("./")
 
 CAMERA_NAMES = ['cam_high', 'cam_right_wrist', 'cam_left_wrist']
@@ -402,46 +405,19 @@ class RosOperator(Node):
     def __init__(self, args):
         super().__init__('joint_state_publisher') 
         self.args = args
-        self.logger = LogManager()  # Initialize logger
-        self.logger.log_system("Initializing ROS operator...")
-
-        self.robot_base_deque = None
-        self.puppet_arm_right_deque = None
-        self.puppet_arm_left_deque = None
-        self.img_front_deque = None
-        self.img_right_deque = None
-        self.img_left_deque = None
-        self.img_front_depth_deque = None
-        self.img_right_depth_deque = None
-        self.img_left_depth_deque = None
-        self.bridge = None
-        self.puppet_arm_left_publisher = None
-        self.puppet_arm_right_publisher = None
-        self.robot_base_publisher = None
-        self.puppet_arm_publish_thread = None
-        self.puppet_arm_publish_lock = None
+        self.logger = LogManager()
         
-        # Define QoS profile for better reliability
-        self.sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-        self.control_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-
-        print("\nInitializing ROS operator...")
+        # Initialize basic components
         self.init()
-        print("Starting ROS subscriptions and publishers...")
-        self.init_ros()
+        
+        # Initialize publishers and synchronized subscribers
+        self.init_publishers()
+        self.init_synchronized_subscribers()
         
         # Add a timer for subscription checking
         self.create_timer(60.0, self.check_subscriptions)
         
-        # Create a separate thread for spinning
+        # Start spin thread
         self.spin_thread = threading.Thread(target=self._spin)
         self.spin_thread.daemon = True
         self.spin_thread.start()
@@ -452,27 +428,280 @@ class RosOperator(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
 
     def init(self):
+        """Initialize basic components"""
         self.bridge = CvBridge()
-        self.img_left_deque = deque()
-        self.img_right_deque = deque()
-        self.img_front_deque = deque()
-        self.img_left_depth_deque = deque()
-        self.img_right_depth_deque = deque()
-        self.img_front_depth_deque = deque()
-        self.puppet_arm_left_deque = deque()
-        self.puppet_arm_right_deque = deque()
-        self.robot_base_deque = deque()
+        # Single deque for synchronized data
+        self.synced_data = deque(maxlen=10)
+        self.robot_base_deque = deque(maxlen=2000)  # Keep this for robot base data
         self.puppet_arm_publish_lock = threading.Lock()
         self.puppet_arm_publish_lock.acquire()
 
+    def init_publishers(self):
+        """Initialize all publishers"""
+        # Create publishers with QoS profiles
+        self.puppet_arm_left_publisher = self.create_publisher(
+            JointGroupCommand,
+            self.args.puppet_arm_left_cmd_topic,
+            10
+        )
+        
+        self.puppet_arm_right_publisher = self.create_publisher(
+            JointGroupCommand,
+            self.args.puppet_arm_right_cmd_topic,
+            10
+        )
+        
+        self.puppet_arm_left_gripper_publisher = self.create_publisher(
+            JointSingleCommand,
+            self.args.puppet_arm_left_gripper_cmd_topic,
+            10
+        )
+        
+        self.puppet_arm_right_gripper_publisher = self.create_publisher(
+            JointSingleCommand,
+            self.args.puppet_arm_right_gripper_cmd_topic,
+            10
+        )
+        
+        self.robot_base_publisher = self.create_publisher(
+            Twist,
+            self.args.robot_base_cmd_topic,
+            10
+        )
+
+    def init_synchronized_subscribers(self):
+        """Initialize synchronized subscribers using message_filters"""
+        # Create QoS profiles
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        # Create filtered subscribers for RGB images
+        self.sub_front = message_filters.Subscriber(
+            self,
+            CompressedImage,
+            self.args.img_front_topic,
+            qos_profile=sensor_qos
+        )
+        self.sub_left = message_filters.Subscriber(
+            self,
+            CompressedImage,
+            self.args.img_left_topic,
+            qos_profile=sensor_qos
+        )
+        self.sub_right = message_filters.Subscriber(
+            self,
+            CompressedImage,
+            self.args.img_right_topic,
+            qos_profile=sensor_qos
+        )
+        
+        # Create filtered subscribers for joint states
+        self.sub_left_arm = message_filters.Subscriber(
+            self,
+            JointState,
+            self.args.puppet_arm_left_topic,
+            qos_profile=sensor_qos
+        )
+        self.sub_right_arm = message_filters.Subscriber(
+            self,
+            JointState,
+            self.args.puppet_arm_right_topic,
+            qos_profile=sensor_qos
+        )
+
+        # List of subscribers for RGB and arm data
+        subs_rgb_arm = [
+            self.sub_front,
+            self.sub_left,
+            self.sub_right,
+            self.sub_left_arm,
+            self.sub_right_arm
+        ]
+
+        # Create synchronizer for RGB and arm data
+        self.ts_rgb_arm = ApproximateTimeSynchronizer(
+            subs_rgb_arm,
+            queue_size=10,
+            slop=self.args.rgb_sync_threshold
+        )
+        self.ts_rgb_arm.registerCallback(self.sync_callback_rgb_arm)
+
+        # If depth is enabled, set up depth synchronization
+        if self.args.use_depth_image:
+            # Create filtered subscribers for depth images
+            self.sub_front_depth = message_filters.Subscriber(
+                self,
+                Image,
+                self.args.img_front_depth_topic,
+                qos_profile=sensor_qos
+            )
+            self.sub_left_depth = message_filters.Subscriber(
+                self,
+                Image,
+                self.args.img_left_depth_topic,
+                qos_profile=sensor_qos
+            )
+            self.sub_right_depth = message_filters.Subscriber(
+                self,
+                Image,
+                self.args.img_right_depth_topic,
+                qos_profile=sensor_qos
+            )
+
+            # Create synchronizer for depth data
+            self.ts_depth = ApproximateTimeSynchronizer(
+                [self.sub_front_depth, self.sub_left_depth, self.sub_right_depth],
+                queue_size=5,
+                slop=self.args.depth_sync_threshold
+            )
+            self.ts_depth.registerCallback(self.sync_callback_depth)
+
+        # Subscribe to robot base data separately (not synchronized)
+        if self.args.use_robot_base:
+            self.create_subscription(
+                Odometry,
+                self.args.robot_base_topic,
+                self.robot_base_callback,
+                sensor_qos
+            )
+
+    def sync_callback_rgb_arm(self, msg_front, msg_left, msg_right, msg_left_arm, msg_right_arm):
+        """Callback for synchronized RGB and arm data"""
+        try:
+            # Convert compressed images to cv2 format
+            cv_front = self.compressed_imgmsg_to_cv2(msg_front)
+            cv_left = self.compressed_imgmsg_to_cv2(msg_left)
+            cv_right = self.compressed_imgmsg_to_cv2(msg_right)
+
+            # Store synchronized data
+            synced_data = {
+                'timestamp': msg_front.header.stamp,
+                'rgb_front': cv_front,
+                'rgb_left': cv_left,
+                'rgb_right': cv_right,
+                'left_arm': msg_left_arm,
+                'right_arm': msg_right_arm,
+                'depth_front': None,
+                'depth_left': None,
+                'depth_right': None
+            }
+            
+            self.synced_data.append(synced_data)
+            # self.logger.log_sync_status("RGB-ARM sync successful")
+            
+        except Exception as e:
+            self.logger.log_error("Error in RGB-ARM sync callback", e)
+
+    def sync_callback_depth(self, msg_front_depth, msg_left_depth, msg_right_depth):
+        """Callback for synchronized depth data"""
+        try:
+            # Convert depth images
+            cv_front_depth = self.bridge.imgmsg_to_cv2(msg_front_depth, desired_encoding='passthrough')
+            cv_left_depth = self.bridge.imgmsg_to_cv2(msg_left_depth, desired_encoding='passthrough')
+            cv_right_depth = self.bridge.imgmsg_to_cv2(msg_right_depth, desired_encoding='passthrough')
+
+            # Find matching RGB data based on timestamp
+            if len(self.synced_data) > 0:
+                latest_data = self.synced_data[-1]
+                # Update depth data if timestamps are close enough
+                time_diff = abs((msg_front_depth.header.stamp.sec - latest_data['timestamp'].sec) + 
+                              (msg_front_depth.header.stamp.nanosec - latest_data['timestamp'].nanosec) * 1e-9)
+                
+                if time_diff < self.args.depth_sync_threshold:
+                    latest_data['depth_front'] = cv_front_depth
+                    latest_data['depth_left'] = cv_left_depth
+                    latest_data['depth_right'] = cv_right_depth
+                    # self.logger.log_sync_status("Depth sync successful")
+                
+        except Exception as e:
+            self.logger.log_error("Error in depth sync callback", e)
+
+    def robot_base_callback(self, msg):
+        """Callback for robot base data"""
+        if len(self.robot_base_deque) >= 2000:
+            self.robot_base_deque.popleft()
+        self.robot_base_deque.append(msg)
+
+    def compressed_imgmsg_to_cv2(self, compressed_msg):
+        """Convert compressed image message to CV2 format"""
+        np_arr = np.frombuffer(compressed_msg.data, np.uint8)
+        return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
     def check_subscriptions(self):
         """Periodically check if we're receiving data from subscriptions"""
-        print("\nSubscription Status:")
-        print(f"Left camera images: {len(self.img_left_deque)}")
-        print(f"Right camera images: {len(self.img_right_deque)}")
-        print(f"Front camera images: {len(self.img_front_deque)}")
-        print(f"Left arm states: {len(self.puppet_arm_left_deque)}")
-        print(f"Right arm states: {len(self.puppet_arm_right_deque)}")
+        self.logger.log_system("\nSubscription Status:")
+        self.logger.log_system(f"Synchronized data queue size: {len(self.synced_data)}")
+        if self.args.use_robot_base:
+            self.logger.log_system(f"Robot base queue size: {len(self.robot_base_deque)}")
+
+    def get_frame(self):
+        """Get latest synchronized frame data"""
+        if len(self.synced_data) == 0:
+            return False
+
+        latest_data = self.synced_data[-1]
+        robot_base = self.robot_base_deque[-1] if self.args.use_robot_base and len(self.robot_base_deque) > 0 else None
+        
+        return (
+            latest_data['rgb_front'],
+            latest_data['rgb_left'],
+            latest_data['rgb_right'],
+            latest_data['depth_front'],
+            latest_data['depth_left'],
+            latest_data['depth_right'],
+            latest_data['left_arm'],
+            latest_data['right_arm'],
+            robot_base
+        )
+
+    def puppet_arm_publish(self, left, right):
+        """Publish commands to puppet arms with error handling"""
+        try:
+            # Validate input
+            if len(left) < 7 or len(right) < 7:
+                raise ValueError("Invalid arm command length")
+                
+            # Process and publish commands
+            self._publish_arm_commands(left[:6], right[:6])
+            self._publish_gripper_commands(left[6], right[6])
+            
+        except Exception as e:
+            self.logger.log_error(f"Error in puppet_arm_publish: {e}")
+            raise
+
+    def _publish_arm_commands(self, left_joints, right_joints):
+        """Helper method to publish arm commands"""
+        left_msg = JointGroupCommand(name="arm", cmd=left_joints)
+        right_msg = JointGroupCommand(name="arm", cmd=right_joints)
+        
+        self.puppet_arm_left_publisher.publish(left_msg)
+        self.puppet_arm_right_publisher.publish(right_msg)
+
+    def _publish_gripper_commands(self, left_gripper, right_gripper):
+        """Helper method to publish gripper commands"""
+        # Clamp gripper values
+        left_gripper = max(min(float(left_gripper), 1.5), 0.68)
+        right_gripper = max(min(float(right_gripper), 1.5), 0.68)
+        
+        left_msg = JointSingleCommand(name="gripper", cmd=left_gripper)
+        right_msg = JointSingleCommand(name="gripper", cmd=right_gripper)
+        
+        self.puppet_arm_left_gripper_publisher.publish(left_msg)
+        self.puppet_arm_right_gripper_publisher.publish(right_msg)
+
+    def robot_base_publish(self, vel):
+        """Publish commands to robot base"""
+        vel_msg = Twist()
+        vel_msg.linear.x = vel[0]
+        vel_msg.linear.y = 0
+        vel_msg.linear.z = 0
+        vel_msg.angular.x = 0
+        vel_msg.angular.y = 0
+        vel_msg.angular.z = vel[1]
+        self.robot_base_publisher.publish(vel_msg)
 
     def puppet_arm_publish(self, left, right):
         try:
@@ -521,7 +750,6 @@ class RosOperator(Node):
         except Exception as e:
             print(f"Error publishing arm/gripper commands: {e}")
 
-
     def robot_base_publish(self, vel):
         vel_msg = Twist()
         vel_msg.linear.x = vel[0]
@@ -533,6 +761,7 @@ class RosOperator(Node):
         self.robot_base_publisher.publish(vel_msg)
 
     def puppet_arm_publish_continuous(self, left, right):
+        """Publish continuous commands to puppet arms until target position is reached"""
         # Take first 6 values for joints and 7th value for gripper
         left_joints = left[:6]  # Explicitly take only first 6 values for joints
         left_gripper = left[6] if len(left) > 6 else 0.7  # Get gripper value if provided
@@ -545,22 +774,22 @@ class RosOperator(Node):
         left_current_gripper = None
         right_current_gripper = None
         
-        while True and rclpy.ok():
-            if len(self.puppet_arm_left_deque) != 0:
-                left_arm = list(self.puppet_arm_left_deque[-1].position[:6])  # First 6 values
-                left_current_gripper = self.puppet_arm_left_deque[-1].position[6]
-            if len(self.puppet_arm_right_deque) != 0:
-                right_arm = list(self.puppet_arm_right_deque[-1].position[:6])  # First 6 values
-                right_current_gripper = self.puppet_arm_right_deque[-1].position[6]
-            if left_arm is None or right_arm is None:
+        # Wait for initial synchronized data
+        while rclpy.ok():
+            if len(self.synced_data) == 0:
                 rate.sleep()
                 continue
-            else:
-                break
+                
+            latest_data = self.synced_data[-1]
+            left_arm = list(latest_data['left_arm'].position[:6])  # First 6 values
+            right_arm = list(latest_data['right_arm'].position[:6])  # First 6 values
+            left_current_gripper = latest_data['left_arm'].position[6]
+            right_current_gripper = latest_data['right_arm'].position[6]
+            break
 
         # Calculate movement directions for joints and grippers
-        left_symbol = [1 if left_joints[i] - left_arm[i] > 0 else -1 for i in range(6)]  # Use 6 instead of len()
-        right_symbol = [1 if right_joints[i] - right_arm[i] > 0 else -1 for i in range(6)]  # Use 6 instead of len()
+        left_symbol = [1 if left_joints[i] - left_arm[i] > 0 else -1 for i in range(6)]
+        right_symbol = [1 if right_joints[i] - right_arm[i] > 0 else -1 for i in range(6)]
         
         left_gripper_symbol = 1 if left_gripper - left_current_gripper > 0 else -1
         right_gripper_symbol = 1 if right_gripper - right_current_gripper > 0 else -1
@@ -574,14 +803,14 @@ class RosOperator(Node):
             if self.puppet_arm_publish_lock.acquire(False):
                 return
                 
-            left_diff = [abs(left_joints[i] - left_arm[i]) for i in range(6)]  # Use 6 instead of len()
-            right_diff = [abs(right_joints[i] - right_arm[i]) for i in range(6)]  # Use 6 instead of len()
+            left_diff = [abs(left_joints[i] - left_arm[i]) for i in range(6)]
+            right_diff = [abs(right_joints[i] - right_arm[i]) for i in range(6)]
             left_gripper_diff = abs(left_gripper - left_current_gripper)
             right_gripper_diff = abs(right_gripper - right_current_gripper)
             
             flag = False
             
-            # Use range(6) to ensure we only process joint values
+            # Update joint positions
             for i in range(6):
                 if left_diff[i] < self.args.arm_steps_length[i]:
                     left_arm[i] = left_joints[i]
@@ -612,270 +841,49 @@ class RosOperator(Node):
             # Publish arm commands (6 joints)
             left_msg = JointGroupCommand()
             left_msg.name = "arm"
-            left_msg.cmd = left_arm  # This is now guaranteed to be 6 elements
+            left_msg.cmd = left_arm
             self.puppet_arm_left_publisher.publish(left_msg)
 
             right_msg = JointGroupCommand()
             right_msg.name = "arm"
-            right_msg.cmd = right_arm  # This is now guaranteed to be 6 elements
+            right_msg.cmd = right_arm
             self.puppet_arm_right_publisher.publish(right_msg)
             
             # Publish gripper commands separately
             left_gripper_msg = JointSingleCommand()
             left_gripper_msg.name = "gripper"
-            left_gripper_msg.cmd = float(left_gripper)
+            left_gripper_msg.cmd = float(left_current_gripper)
             self.puppet_arm_left_gripper_publisher.publish(left_gripper_msg)
 
             right_gripper_msg = JointSingleCommand()
             right_gripper_msg.name = "gripper"
-            right_gripper_msg.cmd = float(right_gripper)
+            right_gripper_msg.cmd = float(right_current_gripper)
             self.puppet_arm_right_gripper_publisher.publish(right_gripper_msg)
 
             step += 1
-            print(f"puppet_arm_publish_continuous step {step}:")
-            print(f"Left arm: {left_arm}, gripper: {left_current_gripper}")
-            print(f"Right arm: {right_arm}, gripper: {right_current_gripper}")
-            rate.sleep()
-
-    def puppet_arm_publish_linear(self, left, right):
-        num_step = 100
-        rate = self.create_rate(200)
-
-        left_arm = None
-        right_arm = None
-
-        while True and rclpy.ok():
-            if len(self.puppet_arm_left_deque) != 0:
-                left_arm = list(self.puppet_arm_left_deque[-1].position)
-            if len(self.puppet_arm_right_deque) != 0:
-                right_arm = list(self.puppet_arm_right_deque[-1].position)
-            if left_arm is None or right_arm is None:
-                rate.sleep()
-                continue
-            else:
-                break
-
-        traj_left_list = np.linspace(left_arm, left, num_step)
-        traj_right_list = np.linspace(right_arm, right, num_step)
-
-        for i in range(len(traj_left_list)):
-            traj_left = traj_left_list[i]
-            traj_right = traj_right_list[i]
-            traj_left[-1] = left[-1]
-            traj_right[-1] = right[-1]
-            joint_state_msg = JointState()
-            joint_state_msg.header = Header()
-            joint_state_msg.header.stamp = self.get_clock().now().to_msg()  # 设置时间戳
-            joint_state_msg.name = ['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']  # 设置关节名称
-            joint_state_msg.position = traj_left
-            self.puppet_arm_left_publisher.publish(joint_state_msg)
-            joint_state_msg.position = traj_right
-            self.puppet_arm_right_publisher.publish(joint_state_msg)
+            self.logger.log_system(f"puppet_arm_publish_continuous step {step}:")
+            self.logger.log_system(f"Left arm: {left_arm}, gripper: {left_current_gripper}")
+            self.logger.log_system(f"Right arm: {right_arm}, gripper: {right_current_gripper}")
             rate.sleep()
 
     def puppet_arm_publish_continuous_thread(self, left, right):
-        if self.puppet_arm_publish_thread is not None:
+        """Start continuous publishing in a new thread with proper cleanup"""
+        if hasattr(self, 'puppet_arm_publish_thread') and self.puppet_arm_publish_thread:
             self.puppet_arm_publish_lock.release()
             self.puppet_arm_publish_thread.join()
             self.puppet_arm_publish_lock.acquire(False)
-            self.puppet_arm_publish_thread = None
-        self.puppet_arm_publish_thread = threading.Thread(target=self.puppet_arm_publish_continuous, args=(left, right))
+        
+        self.puppet_arm_publish_thread = threading.Thread(
+            target=self.puppet_arm_publish_continuous, 
+            args=(left, right)
+        )
         self.puppet_arm_publish_thread.start()
 
-    def get_frame(self):
-        # First check if we have any data at all
-        if (len(self.img_left_deque) == 0 or 
-            len(self.img_right_deque) == 0 or 
-            len(self.img_front_deque) == 0 or 
-            len(self.puppet_arm_left_deque) == 0 or 
-            len(self.puppet_arm_right_deque) == 0):
-            print("Missing data from one or more sources:")
-            print(f"Left camera: {len(self.img_left_deque)}")
-            print(f"Right camera: {len(self.img_right_deque)}")
-            print(f"Front camera: {len(self.img_front_deque)}")
-            print(f"Left arm: {len(self.puppet_arm_left_deque)}")
-            print(f"Right arm: {len(self.puppet_arm_right_deque)}")
-            return False
-
-        # Get the latest timestamp from all sources
-        latest_timestamps = []
-        
-        try:
-            latest_timestamps.extend([
-                self.img_left_deque[-1].header.stamp,
-                self.img_right_deque[-1].header.stamp,
-                self.img_front_deque[-1].header.stamp,
-                self.puppet_arm_left_deque[-1].header.stamp,
-                self.puppet_arm_right_deque[-1].header.stamp
-            ])
-            
-            # Convert timestamps to seconds for easier comparison
-            def get_time_sec(stamp):
-                return stamp.sec + stamp.nanosec * 1e-9
-                
-            timestamps_sec = [get_time_sec(ts) for ts in latest_timestamps]
-            
-            # Find the minimum and maximum timestamps
-            min_time = min(timestamps_sec)
-            max_time = max(timestamps_sec)
-            
-            # Check if timestamps are within acceptable sync threshold (e.g., 0.1 seconds)
-            SYNC_THRESHOLD = 0.35  # 100ms threshold for synchronization
-            if max_time - min_time > SYNC_THRESHOLD:
-                print(f"Timestamp difference too large: {max_time - min_time:.3f}s")
-                print("Timestamps (seconds):")
-                print(f"Left camera: {get_time_sec(self.img_left_deque[-1].header.stamp):.3f}")
-                print(f"Right camera: {get_time_sec(self.img_right_deque[-1].header.stamp):.3f}")
-                print(f"Front camera: {get_time_sec(self.img_front_deque[-1].header.stamp):.3f}")
-                print(f"Left arm: {get_time_sec(self.puppet_arm_left_deque[-1].header.stamp):.3f}")
-                print(f"Right arm: {get_time_sec(self.puppet_arm_right_deque[-1].header.stamp):.3f}")
-                return False
-
-            # Convert images
-            img_left = self.bridge.imgmsg_to_cv2(self.img_left_deque[-1], 'passthrough')
-            img_right = self.bridge.imgmsg_to_cv2(self.img_right_deque[-1], 'passthrough')
-            img_front = self.bridge.imgmsg_to_cv2(self.img_front_deque[-1], 'passthrough')
-            
-            # Get joint states
-            puppet_arm_left = self.puppet_arm_left_deque[-1]
-            puppet_arm_right = self.puppet_arm_right_deque[-1]
-            
-            # For depth images (if used)
-            img_front_depth = None
-            img_left_depth = None
-            img_right_depth = None
-            robot_base = None
-            
-            if self.args.use_depth_image:
-                if len(self.img_left_depth_deque) > 0:
-                    img_left_depth = self.bridge.imgmsg_to_cv2(self.img_left_depth_deque[-1], 'passthrough')
-                if len(self.img_right_depth_deque) > 0:
-                    img_right_depth = self.bridge.imgmsg_to_cv2(self.img_right_depth_deque[-1], 'passthrough')
-                if len(self.img_front_depth_deque) > 0:
-                    img_front_depth = self.bridge.imgmsg_to_cv2(self.img_front_depth_deque[-1], 'passthrough')
-                    
-            if self.args.use_robot_base and len(self.robot_base_deque) > 0:
-                robot_base = self.robot_base_deque[-1]
-
-            return (img_front, img_left, img_right, img_front_depth, img_left_depth, img_right_depth,
-                    puppet_arm_left, puppet_arm_right, robot_base)
-                    
-        except Exception as e:
-            print(f"Error in get_frame: {str(e)}")
-            return False
-
-    def img_left_callback(self, msg):
-        if len(self.img_left_deque) >= 10:
-            self.img_left_deque.popleft()
-        try:
-            # Convert compressed image to cv2 format
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            # Create a new Image message
-            img_msg = Image()
-            img_msg.header = msg.header
-            # Update timestamp to current time if the message doesn't have one
-            if img_msg.header.stamp.sec == 0 and img_msg.header.stamp.nanosec == 0:
-                img_msg.header.stamp = self.get_clock().now().to_msg()
-            img_msg.height = cv_image.shape[0]
-            img_msg.width = cv_image.shape[1]
-            img_msg.encoding = "bgr8"
-            img_msg.is_bigendian = False
-            img_msg.step = cv_image.shape[1] * 3
-            img_msg.data = cv_image.tobytes()
-            self.img_left_deque.append(img_msg)
-        except Exception as e:
-            print(f"Error in left camera callback: {str(e)}")
-
-    def img_right_callback(self, msg):
-        if len(self.img_right_deque) >= 10:
-            self.img_right_deque.popleft()
-        try: 
-            # Convert compressed image to cv2 format
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            # Create a new Image message
-            img_msg = Image()
-            img_msg.header = msg.header
-            # Update timestamp to current time if the message doesn't have one
-            if img_msg.header.stamp.sec == 0 and img_msg.header.stamp.nanosec == 0:
-                img_msg.header.stamp = self.get_clock().now().to_msg()
-            img_msg.height = cv_image.shape[0]
-            img_msg.width = cv_image.shape[1]
-            img_msg.encoding = "bgr8"
-            img_msg.is_bigendian = False
-            img_msg.step = cv_image.shape[1] * 3
-            img_msg.data = cv_image.tobytes()
-            self.img_right_deque.append(img_msg)
-        except Exception as e:
-            print(f"Error in right camera callback: {str(e)}")
-
-    def img_front_callback(self, msg):
-        if len(self.img_front_deque) >= 10:
-            self.img_front_deque.popleft()
-        try:
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            img_msg = Image()
-            img_msg.header = msg.header
-            # Update timestamp to current time if the message doesn't have one
-            if img_msg.header.stamp.sec == 0 and img_msg.header.stamp.nanosec == 0:
-                img_msg.header.stamp = self.get_clock().now().to_msg()
-            img_msg.height = cv_image.shape[0]
-            img_msg.width = cv_image.shape[1]
-            img_msg.encoding = "bgr8"
-            img_msg.is_bigendian = False
-            img_msg.step = cv_image.shape[1] * 3
-            img_msg.data = cv_image.tobytes()
-            self.img_front_deque.append(img_msg)
-        except Exception as e:
-            print(f"Error in front camera callback: {str(e)}")
-
-    def img_left_depth_callback(self, msg):
-        if len(self.img_left_depth_deque) >= 10:
-            self.img_left_depth_deque.popleft()
-        try:
-            # Direct conversion from Image message
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            self.img_left_depth_deque.append(msg)
-        except Exception as e:
-            print(f"Error processing left depth image: {e}")
-
-    def img_right_depth_callback(self, msg):
-        if len(self.img_right_depth_deque) >= 10:
-            self.img_right_depth_deque.popleft()
-        try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            self.img_right_depth_deque.append(msg)
-        except Exception as e:
-            print(f"Error processing right depth image: {e}")
-
-    def img_front_depth_callback(self, msg):
-        if len(self.img_front_depth_deque) >= 10:
-            self.img_front_depth_deque.popleft()
-        try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            self.img_front_depth_deque.append(msg)
-        except Exception as e:
-            print(f"Error processing front depth image: {e}")
-
-    def puppet_arm_left_callback(self, msg):
-        if len(self.puppet_arm_left_deque) >= 2000:
-            self.puppet_arm_left_deque.popleft()
-        self.puppet_arm_left_deque.append(msg)
-        # print(f"Received left puppet arm message, queue size: {len(self.puppet_arm_left_deque)}")
-
-    def puppet_arm_right_callback(self, msg):
-        if len(self.puppet_arm_right_deque) >= 2000:
-            self.puppet_arm_right_deque.popleft()
-        self.puppet_arm_right_deque.append(msg)
-        # print(f"Received right puppet arm message, queue size: {len(self.puppet_arm_right_deque)}")
-
     def robot_base_callback(self, msg):
+        """Callback for robot base data"""
         if len(self.robot_base_deque) >= 2000:
             self.robot_base_deque.popleft()
         self.robot_base_deque.append(msg)
-        # print(f"Received robot base message, queue size: {len(self.robot_base_deque)}")
 
     # ros 2 version:
     def init_ros(self):
@@ -1050,6 +1058,11 @@ def get_arguments():
     parser.add_argument('--use_depth_image', action='store_true', 
                         help='Whether to use depth images',
                         default=False, required=False)
+    
+    parser.add_argument('--rgb_sync_threshold', type=float, default=0.1,
+                    help='Sync threshold for RGB cameras and arms (seconds)')
+    parser.add_argument('--depth_sync_threshold', type=float, default=0.2,
+                        help='Sync threshold for depth cameras (seconds)')
     
     parser.add_argument('--disable_puppet_arm', action='store_true',
                         help='Whether to disable the puppet arm. This is useful for safely debugging',default=False)
