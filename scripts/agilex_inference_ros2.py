@@ -475,89 +475,45 @@ class RosOperator(Node):
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=30
         )
 
-        # Create filtered subscribers for RGB images
-        self.sub_front = message_filters.Subscriber(
-            self,
-            CompressedImage,
-            self.args.img_front_topic,
-            qos_profile=sensor_qos
-        )
-        self.sub_left = message_filters.Subscriber(
-            self,
-            CompressedImage,
-            self.args.img_left_topic,
-            qos_profile=sensor_qos
-        )
-        self.sub_right = message_filters.Subscriber(
-            self,
-            CompressedImage,
-            self.args.img_right_topic,
-            qos_profile=sensor_qos
-        )
-        
-        # Create filtered subscribers for joint states
-        self.sub_left_arm = message_filters.Subscriber(
-            self,
-            JointState,
-            self.args.puppet_arm_left_topic,
-            qos_profile=sensor_qos
-        )
-        self.sub_right_arm = message_filters.Subscriber(
-            self,
-            JointState,
-            self.args.puppet_arm_right_topic,
-            qos_profile=sensor_qos
-        )
-
-        # List of subscribers for RGB and arm data
+        # Create two separate synchronizers - one for RGB+arms and one for depth
+        # RGB and arm synchronizer
         subs_rgb_arm = [
-            self.sub_front,
-            self.sub_left,
-            self.sub_right,
-            self.sub_left_arm,
-            self.sub_right_arm
+            message_filters.Subscriber(self, CompressedImage, self.args.img_front_topic, qos_profile=sensor_qos),
+            message_filters.Subscriber(self, CompressedImage, self.args.img_left_topic, qos_profile=sensor_qos),
+            message_filters.Subscriber(self, CompressedImage, self.args.img_right_topic, qos_profile=sensor_qos),
+            message_filters.Subscriber(self, JointState, self.args.puppet_arm_left_topic, qos_profile=sensor_qos),
+            message_filters.Subscriber(self, JointState, self.args.puppet_arm_right_topic, qos_profile=sensor_qos)
         ]
 
         # Create synchronizer for RGB and arm data
         self.ts_rgb_arm = ApproximateTimeSynchronizer(
             subs_rgb_arm,
-            queue_size=10,
+            queue_size=30,
             slop=self.args.rgb_sync_threshold
         )
         self.ts_rgb_arm.registerCallback(self.sync_callback_rgb_arm)
 
-        # If depth is enabled, set up depth synchronization
+        # Debug logging
+        self.logger.log_system("RGB+Arm synchronizer initialized")
+
         if self.args.use_depth_image:
-            # Create filtered subscribers for depth images
-            self.sub_front_depth = message_filters.Subscriber(
-                self,
-                Image,
-                self.args.img_front_depth_topic,
-                qos_profile=sensor_qos
-            )
-            self.sub_left_depth = message_filters.Subscriber(
-                self,
-                Image,
-                self.args.img_left_depth_topic,
-                qos_profile=sensor_qos
-            )
-            self.sub_right_depth = message_filters.Subscriber(
-                self,
-                Image,
-                self.args.img_right_depth_topic,
-                qos_profile=sensor_qos
-            )
+            subs_depth = [
+                message_filters.Subscriber(self, CompressedImage, self.args.img_front_depth_topic, qos_profile=sensor_qos),
+                message_filters.Subscriber(self, CompressedImage, self.args.img_left_depth_topic, qos_profile=sensor_qos),
+                message_filters.Subscriber(self, CompressedImage, self.args.img_right_depth_topic, qos_profile=sensor_qos)
+            ]
 
             # Create synchronizer for depth data
             self.ts_depth = ApproximateTimeSynchronizer(
-                [self.sub_front_depth, self.sub_left_depth, self.sub_right_depth],
-                queue_size=5,
+                subs_depth,
+                queue_size=30,
                 slop=self.args.depth_sync_threshold
             )
             self.ts_depth.registerCallback(self.sync_callback_depth)
+            # self.logger.log_system("Depth synchronizer initialized")
 
         # Subscribe to robot base data separately (not synchronized)
         if self.args.use_robot_base:
@@ -590,7 +546,7 @@ class RosOperator(Node):
             }
             
             self.synced_data.append(synced_data)
-            # self.logger.log_sync_status("RGB-ARM sync successful")
+            self.logger.log_sync_status("RGB-ARM sync successful")
             
         except Exception as e:
             self.logger.log_error("Error in RGB-ARM sync callback", e)
@@ -598,24 +554,30 @@ class RosOperator(Node):
     def sync_callback_depth(self, msg_front_depth, msg_left_depth, msg_right_depth):
         """Callback for synchronized depth data"""
         try:
-            # Convert depth images
-            cv_front_depth = self.bridge.imgmsg_to_cv2(msg_front_depth, desired_encoding='passthrough')
-            cv_left_depth = self.bridge.imgmsg_to_cv2(msg_left_depth, desired_encoding='passthrough')
-            cv_right_depth = self.bridge.imgmsg_to_cv2(msg_right_depth, desired_encoding='passthrough')
+            # Convert compressed depth images
+            np_front_depth = np.frombuffer(msg_front_depth.data, np.uint8)
+            np_left_depth = np.frombuffer(msg_left_depth.data, np.uint8)
+            np_right_depth = np.frombuffer(msg_right_depth.data, np.uint8)
+            
+            cv_front_depth = cv2.imdecode(np_front_depth, cv2.IMREAD_ANYDEPTH)
+            cv_left_depth = cv2.imdecode(np_left_depth, cv2.IMREAD_ANYDEPTH)
+            cv_right_depth = cv2.imdecode(np_right_depth, cv2.IMREAD_ANYDEPTH)
 
             # Find matching RGB data based on timestamp
             if len(self.synced_data) > 0:
                 latest_data = self.synced_data[-1]
                 # Update depth data if timestamps are close enough
                 time_diff = abs((msg_front_depth.header.stamp.sec - latest_data['timestamp'].sec) + 
-                              (msg_front_depth.header.stamp.nanosec - latest_data['timestamp'].nanosec) * 1e-9)
+                            (msg_front_depth.header.stamp.nanosec - latest_data['timestamp'].nanosec) * 1e-9)
                 
                 if time_diff < self.args.depth_sync_threshold:
                     latest_data['depth_front'] = cv_front_depth
                     latest_data['depth_left'] = cv_left_depth
                     latest_data['depth_right'] = cv_right_depth
-                    # self.logger.log_sync_status("Depth sync successful")
-                
+                    self.logger.log_system(f"Successfully matched depth data. Time diff: {time_diff:.3f}s")
+                else:
+                    self.logger.log_system(f"Depth data too far from RGB. Time diff: {time_diff:.3f}s")                    
+                    
         except Exception as e:
             self.logger.log_error("Error in depth sync callback", e)
 
@@ -885,115 +847,6 @@ class RosOperator(Node):
             self.robot_base_deque.popleft()
         self.robot_base_deque.append(msg)
 
-    # ros 2 version:
-    def init_ros(self):
-        # Create subscribers
-        self.create_subscription(
-            CompressedImage,
-            self.args.img_left_topic,
-            self.img_left_callback,
-            self.sensor_qos
-        )
-        
-        self.create_subscription(
-            CompressedImage,
-            self.args.img_right_topic,
-            self.img_right_callback,
-            self.sensor_qos
-        )
-        
-        self.create_subscription(
-            CompressedImage,
-            self.args.img_front_topic,
-            self.img_front_callback,
-            self.sensor_qos
-        )
-
-        if self.args.use_depth_image:
-            self.create_subscription(
-                Image,  # Changed from CompressedImage to Image
-                self.args.img_left_depth_topic,
-                self.img_left_depth_callback,
-                self.sensor_qos
-            )
-            
-            self.create_subscription(
-                Image,  # Changed from CompressedImage to Image
-                self.args.img_right_depth_topic,
-                self.img_right_depth_callback,
-                self.sensor_qos
-            )
-            
-            self.create_subscription(
-                Image,  # Changed from CompressedImage to Image
-                self.args.img_front_depth_topic,
-                self.img_front_depth_callback,
-                self.sensor_qos
-            )
-
-        self.create_subscription(
-            JointState,
-            self.args.puppet_arm_left_topic,
-            self.puppet_arm_left_callback,
-            self.control_qos
-        )
-        
-        self.create_subscription(
-            JointState,
-            self.args.puppet_arm_right_topic,
-            self.puppet_arm_right_callback,
-            self.control_qos
-        )
-        
-        self.create_subscription(
-            Odometry,
-            self.args.robot_base_topic,
-            self.robot_base_callback,
-            self.sensor_qos
-        )
-
-        # Create publishers with debug prints
-        self.puppet_arm_left_publisher = self.create_publisher(
-            JointGroupCommand,
-            self.args.puppet_arm_left_cmd_topic,
-            10
-        )
-        print(f"Created left arm publisher on topic: {self.args.puppet_arm_left_cmd_topic}")
-        
-        self.puppet_arm_right_publisher = self.create_publisher(
-            JointGroupCommand,
-            self.args.puppet_arm_right_cmd_topic,
-            10
-        )
-        print(f"Created right arm publisher on topic: {self.args.puppet_arm_right_cmd_topic}")
-            
-        # Add gripper publishers
-        self.puppet_arm_left_gripper_publisher = self.create_publisher(
-            JointSingleCommand,
-            self.args.puppet_arm_left_gripper_cmd_topic,
-            10
-        )
-        print(f"Created left gripper publisher on topic: {self.args.puppet_arm_left_gripper_cmd_topic}")
-        
-        self.puppet_arm_right_gripper_publisher = self.create_publisher(
-            JointSingleCommand,
-            self.args.puppet_arm_right_gripper_cmd_topic,
-            10
-        )
-        print(f"Created right gripper publisher on topic: {self.args.puppet_arm_right_gripper_cmd_topic}")
-
-        
-        self.robot_base_publisher = self.create_publisher(
-            Twist,
-            self.args.robot_base_cmd_topic,
-            10
-        )
-
-        # Verify publishers are created
-        print("\nPublisher status:")
-        print(f"Left arm publisher: {self.puppet_arm_left_publisher}")
-        print(f"Right arm publisher: {self.puppet_arm_right_publisher}")
-
 def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_publish_step', action='store', type=int, 
@@ -1009,11 +862,11 @@ def get_arguments():
                         default='/camera_wrist_right/camera/color/image_rect_raw/compressed', required=False)
     
     parser.add_argument('--img_front_depth_topic', action='store', type=str, help='img_front_depth_topic',
-                        default='/camera_high/camera/depth/image_rect_raw', required=False)  
+                        default='/camera_high/camera/depth/image_rect_raw/compressedDepth', required=False)  
     parser.add_argument('--img_left_depth_topic', action='store', type=str, help='img_left_depth_topic',
-                        default='/camera_wrist_left/camera/depth/image_raw', required=False)  
+                        default='/camera_wrist_left/camera/depth/image_rect_raw/compressedDepth', required=False)  
     parser.add_argument('--img_right_depth_topic', action='store', type=str, help='img_right_depth_topic',
-                        default='/camera_wrist_right/camera/depth/image_raw', required=False)  
+                        default='/camera_wrist_right/camera/depth/image_rect_raw/compressedDepth', required=False)  
     
     parser.add_argument('--puppet_arm_left_cmd_topic', action='store', type=str, help='puppet_arm_left_cmd_topic',
                         default='/follower_left/commands/joint_group', required=False)
@@ -1043,7 +896,7 @@ def get_arguments():
                         default=30, required=False)
     parser.add_argument('--ctrl_freq', action='store', type=int, 
                         help='The control frequency of the robot',
-                        default=15, required=False)
+                        default=30, required=False)
     
     parser.add_argument('--chunk_size', action='store', type=int, 
                         help='Action chunk size',
@@ -1057,11 +910,11 @@ def get_arguments():
                         default=True, required=False)
     parser.add_argument('--use_depth_image', action='store_true', 
                         help='Whether to use depth images',
-                        default=False, required=False)
+                        default=True, required=False)
     
-    parser.add_argument('--rgb_sync_threshold', type=float, default=0.1,
+    parser.add_argument('--rgb_sync_threshold', type=float, default=0.2,
                     help='Sync threshold for RGB cameras and arms (seconds)')
-    parser.add_argument('--depth_sync_threshold', type=float, default=0.2,
+    parser.add_argument('--depth_sync_threshold', type=float, default=0.3,
                         help='Sync threshold for depth cameras (seconds)')
     
     parser.add_argument('--disable_puppet_arm', action='store_true',
