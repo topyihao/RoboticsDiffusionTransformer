@@ -39,6 +39,7 @@ import os
 
 import message_filters
 from message_filters import ApproximateTimeSynchronizer, Subscriber
+from scipy.interpolate import CubicSpline
 
 # sys.path.append("./")
 
@@ -101,6 +102,25 @@ def interpolate_action(args, prev_action, cur_action):
     new_actions = np.linspace(prev_action, cur_action, step + 1)
     return new_actions[1:]
 
+# def interpolate_action(args, pre_action, action):
+#     """Enhanced interpolation between actions for smoother transitions"""
+#     num_interp = int(args.publish_rate / args.ctrl_freq)  # Number of interpolation steps
+    
+#     # Use cubic interpolation instead of linear
+#     timestamps = np.linspace(0, 1, num_interp)
+#     interp_actions = np.zeros((num_interp, action.shape[0]))
+    
+#     for i in range(action.shape[0]):
+#         # Create CubicSpline interpolation
+#         cs = CubicSpline(
+#             [0, 1],           # x coordinates (timestamps)
+#             [pre_action[i], action[i]]  # y coordinates (values)
+#         )
+#         # Evaluate the spline at the interpolation points
+#         interp_actions[:, i] = cs(timestamps)
+    
+#     return interp_actions
+
 
 def get_config(args):
     config = {
@@ -150,13 +170,13 @@ def update_observation_window(args, config, ros_operator):
     img_front, img_left, img_right, puppet_arm_left, puppet_arm_right = get_ros_observation(args, ros_operator)
     
     # Debug image processing
-    print(f"Processing images - Front: {img_front.shape}, Left: {img_left.shape}, Right: {img_right.shape}")
+    # print(f"Processing images - Front: {img_front.shape}, Left: {img_left.shape}, Right: {img_right.shape}")
     
     # JPEG transformation
     img_front = jpeg_mapping(img_front)
     img_left = jpeg_mapping(img_left)
     img_right = jpeg_mapping(img_right)
-    print("JPEG transformation completed")
+    # print("JPEG transformation completed")
     
     # Process joint positions - Take 6 values and pad with zeros to match model input
     left_pos = np.array(puppet_arm_left.position[:6])   # Take first 6 values
@@ -285,7 +305,7 @@ def model_inference(args, config, ros_operator):
     left0 = [0.0, -1.822, 1.554, -0.008, -1.569, -0.008, 0.7]
     right0 = [0.0, -1.822, 1.554, -0.008, -1.569, -0.008, 0.7]
     left1 = [0.0, -1.822, 1.554, -0.008, -1.569, -0.008, 1.5]
-    right1 = [0.0, -1.822, 1.554, -0.008, -1.569, -0.008, 1.5]
+    right1 = [0.0, -1.822, 1.554, -0.008, -1.569, -0.008, 0.7]
     ros_operator.puppet_arm_publish_continuous(left0, right0)
     input("Press enter to continue")
     ros_operator.puppet_arm_publish_continuous(left1, right1)
@@ -332,12 +352,13 @@ def model_inference(args, config, ros_operator):
                 # Execute the interpolated actions one by one
                 for act in interp_actions:
                     # Take only first 6 values for each arm (excluding gripper)
-                    left_action = act[:7]
-                    right_action = act[7:14]
-                    print(f"Executing actions - Left: {left_action}, Right: {right_action}")
+                    # left_action = act[:7]
+                    # right_action = act[7:14]
+                    right_action = act[:7]
+                    left_action = act[7:14]
+                    # print(f"Executing actions - Left: {left_action}, Right: {right_action}")
                     if not args.disable_puppet_arm:
                         ros_operator.puppet_arm_publish(left_action, right_action)
-
                     if args.use_robot_base:
                         vel_action = act[14:16]
                         ros_operator.robot_base_publish(vel_action)
@@ -546,7 +567,7 @@ class RosOperator(Node):
             }
             
             self.synced_data.append(synced_data)
-            self.logger.log_sync_status("RGB-ARM sync successful")
+            # self.logger.log_sync_status("RGB-ARM sync successful")
             
         except Exception as e:
             self.logger.log_error("Error in RGB-ARM sync callback", e)
@@ -665,6 +686,22 @@ class RosOperator(Node):
         vel_msg.angular.z = vel[1]
         self.robot_base_publisher.publish(vel_msg)
 
+    def map_range(self, x, in_min=0.26, in_max=1.28, out_min=0.6, out_max=1.67):
+        """
+        Maps a value from one range to another using linear interpolation
+        
+        Args:
+            x: Input value to map
+            in_min: Input range minimum (default 0)
+            in_max: Input range maximum (default 1.28)
+            out_min: Output range minimum (default 0.6)
+            out_max: Output range maximum (default 1.67)
+        
+        Returns:
+            Mapped value in new range
+        """
+        return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
     def puppet_arm_publish(self, left, right):
         try:
             # Take first 6 values for joint positions and 7th value for gripper
@@ -673,15 +710,27 @@ class RosOperator(Node):
             right_joints = right[:6]  # First 6 joint positions
             right_gripper = right[6]  # 7th value is gripper
 
+
+            # save log to actions.log
+            # self.logger.log_action(action_type="left arm", data=f"{left_joints.tolist()}")
+            # self.logger.log_action(action_type="left gripper", data=f"{left_gripper}")
+            # self.logger.log_action(action_type="right arm", data=f"{right_joints.tolist()}")
+            self.logger.log_action(action_type="right gripper 1", data=f"{right_gripper}")
+
+            right_gripper = self.map_range(x=abs(right_gripper))
+            left_gripper = self.map_range(x=abs(left_gripper))
+
             # protect gripper from going out of range
-            left_gripper = max(min(left_gripper, 1.5), 0.68)
-            right_gripper = max(min(right_gripper, 1.5), 0.68)
+            # left_gripper = max(min(left_gripper, 1.5), 0.68)
+            # right_gripper = max(min(right_gripper, 1.5), 0.68)
             
+            self.logger.log_action(action_type="right gripper 2", data=f"{right_gripper}")
+
             # Debug print
-            print("Publishing left arm command:", left_joints.tolist())
-            print("Publishing left gripper command:", left_gripper)
-            print("Publishing right arm command:", right_joints.tolist())
-            print("Publishing right gripper command:", right_gripper)
+            # print("Publishing left arm command:", left_joints.tolist())
+            # print("Publishing left gripper command:", left_gripper)
+            # print("Publishing right arm command:", right_joints.tolist())
+            # print("Publishing right gripper command:", right_gripper)
 
             # Create and publish left arm command
             left_msg = JointGroupCommand()
@@ -707,7 +756,7 @@ class RosOperator(Node):
             right_gripper_msg.cmd = float(right_gripper)
             self.puppet_arm_right_gripper_publisher.publish(right_gripper_msg)
 
-            print("All arm and gripper commands published successfully")
+            # print("All arm and gripper commands published successfully")
 
         except Exception as e:
             print(f"Error publishing arm/gripper commands: {e}")
@@ -893,10 +942,10 @@ def get_arguments():
                         default=False, required=False)
     parser.add_argument('--publish_rate', action='store', type=int, 
                         help='The rate at which to publish the actions',
-                        default=30, required=False)
+                        default=8, required=False)
     parser.add_argument('--ctrl_freq', action='store', type=int, 
                         help='The control frequency of the robot',
-                        default=30, required=False)
+                        default=8, required=False)
     
     parser.add_argument('--chunk_size', action='store', type=int, 
                         help='Action chunk size',
@@ -910,11 +959,11 @@ def get_arguments():
                         default=True, required=False)
     parser.add_argument('--use_depth_image', action='store_true', 
                         help='Whether to use depth images',
-                        default=True, required=False)
+                        default=False, required=False)
     
-    parser.add_argument('--rgb_sync_threshold', type=float, default=0.2,
+    parser.add_argument('--rgb_sync_threshold', type=float, default=0.1,
                     help='Sync threshold for RGB cameras and arms (seconds)')
-    parser.add_argument('--depth_sync_threshold', type=float, default=0.3,
+    parser.add_argument('--depth_sync_threshold', type=float, default=0.1,
                         help='Sync threshold for depth cameras (seconds)')
     
     parser.add_argument('--disable_puppet_arm', action='store_true',
@@ -924,10 +973,10 @@ def get_arguments():
                         help='Path to the config file')
     # parser.add_argument('--cfg_scale', type=float, default=2.0,
     #                     help='the scaling factor used to modify the magnitude of the control features during denoising')
-    parser.add_argument('--pretrained_model_name_or_path', type=str, default='robotics-diffusion-transformer/rdt-1b', required=False, help='Name or path to the pretrained model')
+    parser.add_argument('--pretrained_model_name_or_path', type=str, default='rdt-1b-test', required=False, help='Name or path to the pretrained model')
     
     parser.add_argument('--lang_embeddings_path', type=str, required=False, 
-                        default='outs/put_sponge_in_cup.pt', help='Path to the pre-encoded language instruction embeddings')
+                        default='outs/pickup.pt', help='Path to the pre-encoded language instruction embeddings')
     
     args = parser.parse_args()
     return args
