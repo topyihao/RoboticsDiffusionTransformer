@@ -1,6 +1,6 @@
 # RDT-1B: a Diffusion Foundation Model for Bimanual Manipulation
 
-### 📝[Paper](https://arxiv.org/pdf/2410.07864) | 🌍[Project Page](https://rdt-robotics.github.io/rdt-robotics/) | 🤗[Model](https://huggingface.co/robotics-diffusion-transformer/rdt-1b) | 🛢️[Data](https://huggingface.co/datasets/robotics-diffusion-transformer/rdt-ft-data)
+### 📝[Paper](https://arxiv.org/pdf/2410.07864) | 🌍[Project Page](https://rdt-robotics.github.io/rdt-robotics/) | 🤗[Model](https://huggingface.co/robotics-diffusion-transformer/rdt-1b) | 🛢️[Data](https://huggingface.co/datasets/robotics-diffusion-transformer/rdt-ft-data) | 🏞️[Poster](./assets/iclr2025_poster.png)
 
 ![](./assets/head.png)
 
@@ -20,6 +20,7 @@ This repo is an official PyTorch implementation of RDT, containing:
 The following guides include the [installation](#installation), [fine-tuning](#fine-tuning-on-your-own-dataset), and [deployment](#deployment-on-real-robots). Please refer to [pre-training](docs/pretrain.md) for a detailed list of pre-training datasets and a pre-training guide.
 
 ## 📰 News
+- [2025/04/04] [Poster](./assets/iclr2025_poster.png) is uploaded.
 - [2024/12/17] 🔥 [Scripts](#simulation-benchmark) for evaluating RDT in Maniskill Simulation Benchmark is released!
 - [2024/10/23] 🔥 **RDT-170M** (Smaller) model is released, a more VRAM-friendly solution 🚀💻.
 
@@ -248,14 +249,13 @@ We comprehensively evaluate RDT against baseline methods using the ManiSkill sim
    Follow the [ManiSkill documentation](https://maniskill.readthedocs.io/en/latest/user_guide/getting_started/installation.html#vulkan) to properly set up Vulkan。
 
 3. **Obtain Model Weights:**  
-   Download and extract the fine-tuned model weights from [this Hugging Face repository](https://huggingface.co/robotics-diffusion-transformer/maniskill-model/tree/main/rdt). Download the precomputed language embeddings from [here](https://huggingface.co/robotics-diffusion-transformer/maniskill-model/tree/main/lang_embeds) to the root directory of this repo.
+   Download the fine-tuned model weights from [this Hugging Face repository](https://huggingface.co/robotics-diffusion-transformer/maniskill-model/tree/main/rdt). Download the precomputed language embeddings from [here](https://huggingface.co/robotics-diffusion-transformer/maniskill-model/tree/main/lang_embeds) to the root directory of this repo.
    
 4. **Run Evaluation Scripts:**  
    After completing the setup steps, execute the provided evaluation scripts to assess RDT on the selected tasks.
 
 ```
 conda activate rdt 
-cd eval_sim
 python -m eval_sim.eval_rdt_maniskill \
 --pretrained_path PATH_TO_PRETRAINED_MODEL
 ```
