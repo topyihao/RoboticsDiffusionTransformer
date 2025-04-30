@@ -12,11 +12,9 @@ from models.hub_mixin import CompatiblePyTorchModelHubMixin
 from models.rdt.model import RDT
 
 
-class RDTRunner(
-        nn.Module, 
-        CompatiblePyTorchModelHubMixin, 
-        repo_url="https://huggingface.co/robotics-diffusion-transformer/rdt-1b"
-    ):
+class RDTRunner(nn.Module, CompatiblePyTorchModelHubMixin):
+    _repo_url = "https://huggingface.co/robotics-diffusion-transformer/rdt-1b"
+    
     def __init__(self, *, action_dim, pred_horizon, config, 
                  lang_token_dim, img_token_dim, state_token_dim, 
                  max_lang_cond_len, img_cond_len, lang_pos_embed_config=None, 
@@ -99,6 +97,14 @@ class RDTRunner(
 
         if projector is None:
             raise ValueError(f'Unknown projector type: {projector_type}')
+            
+        # Convert projector parameters to model dtype
+        model_dtype = torch.bfloat16  # Default to bfloat16
+        if hasattr(self, 'model') and hasattr(self.model, 'dtype'):
+            model_dtype = self.model.dtype
+            
+        for param in projector.parameters():
+            param.data = param.data.to(model_dtype)
 
         return projector
     
@@ -110,6 +116,14 @@ class RDTRunner(
         
         return: adpated (..., hidden_size) for all input tokens
         '''
+        # Ensure all inputs have the same dtype as parameters
+        target_dtype = next(self.lang_adaptor.parameters()).dtype
+        device = lang_tokens.device
+        
+        lang_tokens = lang_tokens.to(dtype=target_dtype, device=device)
+        img_tokens = img_tokens.to(dtype=target_dtype, device=device)
+        state_tokens = state_tokens.to(dtype=target_dtype, device=device)
+            
         adpated_lang = self.lang_adaptor(lang_tokens)
         adpated_img = self.img_adaptor(img_tokens)
         adpated_state = self.state_adaptor(state_tokens)
@@ -233,15 +247,23 @@ class RDTRunner(
         
         return: (batch_size, horizon, action_dim), predicted action sequence
         '''
-        # Prepare the state and conditions
-        state_tokens = torch.cat([state_tokens, action_mask], dim=2)
+        # Determine the target dtype from model parameters
+        target_dtype = next(self.model.parameters()).dtype
+        
+        # Prepare the state and conditions - with explicit dtype conversion
+        state_tokens = torch.cat([state_tokens, action_mask], dim=2).to(dtype=target_dtype)
+        lang_tokens = lang_tokens.to(dtype=target_dtype)
+        img_tokens = img_tokens.to(dtype=target_dtype)
+        lang_attn_mask = lang_attn_mask.to(device=state_tokens.device)
+        
         lang_cond, img_cond, state_traj = self.adapt_conditions(
             lang_tokens, img_tokens, state_tokens)
         
         # Run sampling
         action_pred = self.conditional_sample(
             lang_cond, lang_attn_mask, img_cond, 
-            state_traj, action_mask, ctrl_freqs,
+            state_traj, action_mask.to(dtype=target_dtype), 
+            ctrl_freqs.to(device=state_tokens.device)
         )
         
         return action_pred

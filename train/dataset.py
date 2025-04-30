@@ -1,17 +1,21 @@
-import traceback
-import time
-import os
+import copy
+import glob
+import itertools
 import json
 import math
+import os
 import random
-from typing import Dict, Sequence
+import time
+import traceback
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from PIL import Image, ImageOps
+import transformers
 from torch.utils.data import Dataset
 from torchvision import transforms
-from PIL import Image
-import transformers
 
 from data.filelock import FileLock
 from data.hdf5_vla_dataset import HDF5VLADataset
@@ -351,10 +355,45 @@ class VLAConsumerDataset(Dataset):
                 data_dict["images"] = preprocessed_images
 
                 if self.use_precomp_lang_embed:
-                    if content["instruction"][-1] == ".":
-                        content["instruction"] = content["instruction"][:-1]
-                    data_dict["lang_embed"] = torch.load(content["instruction"]) \
-                        if random.random() > self.cond_mask_prob else self.empty_lang_embed
+                    instruction = content["instruction"]
+                    # Try different variations of the instruction for embedding lookup
+                    embedding_paths = [
+                        os.path.join("outs/lang_embeddings", f"{instruction}.pt"),  # Original instruction
+                        os.path.join("outs/lang_embeddings", f"{instruction[:-1]}.pt") if instruction.endswith(".") else None,  # Without period
+                        os.path.join("outs/lang_embeddings", f"{instruction}.pt") if not instruction.endswith(".") else None,  # With period added
+                    ]
+                    embedding_paths = [p for p in embedding_paths if p]  # Remove None entries
+                    
+                    # Try each path until one works
+                    found_embedding = False
+                    for embedding_path in embedding_paths:
+                        if os.path.exists(embedding_path):
+                            data_dict["lang_embed"] = torch.load(embedding_path) \
+                                if random.random() > self.cond_mask_prob else self.empty_lang_embed
+                            found_embedding = True
+                            break
+                            
+                    if not found_embedding:
+                        # Fallback 1: Try a simpler instruction
+                        fallback_instruction = "Put the marker into the box"
+                        fallback_paths = [
+                            os.path.join("outs/lang_embeddings", f"{fallback_instruction}.pt"),
+                            os.path.join("outs/lang_embeddings", f"{fallback_instruction}..pt")
+                        ]
+                        
+                        fallback_found = False
+                        for fallback_path in fallback_paths:
+                            if os.path.exists(fallback_path):
+                                print(f"Using fallback instruction: '{fallback_instruction}' instead of '{instruction}'")
+                                data_dict["lang_embed"] = torch.load(fallback_path) \
+                                    if random.random() > self.cond_mask_prob else self.empty_lang_embed
+                                fallback_found = True
+                                break
+                                
+                        if not fallback_found:
+                            # Fallback 2: Use empty embedding
+                            print(f"Warning: No embedding found for '{instruction}'. Using empty embedding.")
+                            data_dict["lang_embed"] = self.empty_lang_embed
                 else:
                     instruction = content["instruction"] \
                         if random.random() > self.cond_mask_prob else ""

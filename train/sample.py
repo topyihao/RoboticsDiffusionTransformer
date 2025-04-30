@@ -43,6 +43,14 @@ def log_sample_res(
                 attention_mask=lang_attn_mask
             )["last_hidden_state"].detach()
             
+        # Ensure everything has the right dtype for the model
+        model_dtype = next(rdt.parameters()).dtype
+        image_embeds = image_embeds.to(dtype=model_dtype)
+        text_embeds = text_embeds.to(dtype=model_dtype)
+        lang_attn_mask = lang_attn_mask.to(device=text_embeds.device)
+        states = states.to(dtype=model_dtype)
+        state_elem_mask = state_elem_mask.to(dtype=model_dtype)
+        
         pred_actions = rdt.predict_action(
             lang_tokens=text_embeds,
             lang_attn_mask=lang_attn_mask,

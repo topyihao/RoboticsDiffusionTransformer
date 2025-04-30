@@ -41,12 +41,18 @@ class CompatiblePyTorchModelHubMixin(PyTorchModelHubMixin):
         model = cls(**model_kwargs)
         if os.path.isdir(model_id):
             print("Loading weights from local directory")
-            try:
-                model_file = os.path.join(model_id, SAFETENSORS_SINGLE_FILE)
-                return cls._load_as_safetensor(model, model_file, map_location, strict)
-            except FileNotFoundError:
-                model_file = os.path.join(model_id, PYTORCH_WEIGHTS_NAME)
-                return cls._load_as_pickle(model, model_file, map_location, strict)
+            # Try to load safetensors file first
+            safetensors_file = os.path.join(model_id, SAFETENSORS_SINGLE_FILE)
+            pytorch_file = os.path.join(model_id, PYTORCH_WEIGHTS_NAME)
+            
+            if os.path.exists(safetensors_file):
+                print(f"Loading from safetensors file: {safetensors_file}")
+                return cls._load_as_safetensor(model, safetensors_file, map_location, strict)
+            elif os.path.exists(pytorch_file):
+                print(f"Loading from PyTorch file: {pytorch_file}")
+                return cls._load_as_pickle(model, pytorch_file, map_location, strict)
+            else:
+                raise FileNotFoundError(f"No model file found at {model_id}. Expected either {SAFETENSORS_SINGLE_FILE} or {PYTORCH_WEIGHTS_NAME}.")
         else:
             try:
                 model_file = hf_hub_download(
@@ -74,3 +80,25 @@ class CompatiblePyTorchModelHubMixin(PyTorchModelHubMixin):
                     local_files_only=local_files_only,
                 )
                 return cls._load_as_pickle(model, model_file, map_location, strict)
+            
+    @classmethod
+    def _load_as_safetensor(cls, model, model_file, map_location, strict):
+        """Load model weights from a safetensor file."""
+        try:
+            from safetensors import safe_open
+            with safe_open(model_file, framework="pt", device=map_location) as f:
+                state_dict = {k: f.get_tensor(k) for k in f.keys()}
+            model.load_state_dict(state_dict, strict=strict)
+            return model
+        except ImportError:
+            raise ImportError("Please install safetensors with: pip install safetensors")
+        except Exception as e:
+            raise RuntimeError(f"Error loading safetensor file: {e}")
+
+    @classmethod
+    def _load_as_pickle(cls, model, model_file, map_location, strict):
+        """Load model weights from a PyTorch pickle file."""
+        import torch
+        state_dict = torch.load(model_file, map_location=map_location)
+        model.load_state_dict(state_dict, strict=strict)
+        return model

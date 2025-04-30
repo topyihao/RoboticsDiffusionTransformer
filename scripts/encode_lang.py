@@ -9,11 +9,11 @@ from models.multimodal_encoder.t5_encoder import T5Embedder
 GPU = 0
 MODEL_PATH = "google/t5-v1_1-xxl"
 CONFIG_PATH = "configs/base.yaml"
-SAVE_DIR = "outs/"
+SAVE_DIR = "outs/lang_embeddings/"
 
 # Modify this to your task name and instruction
-TASK_NAME = "put_sponge_in_cup"
-INSTRUCTION = "Pick up the white sponge with the right hand and put it into the blue cup."
+TASK_NAME = "put_marker_into_box"
+INSTRUCTION = "Put the marker into the box."
 
 # Note: if your GPU VRAM is less than 24GB, 
 # it is recommended to enable offloading by specifying an offload directory.

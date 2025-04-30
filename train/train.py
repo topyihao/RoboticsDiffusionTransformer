@@ -18,6 +18,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import json
 
 import diffusers
 import torch
@@ -147,7 +148,35 @@ def train(args, logger):
         and not os.path.isfile(args.pretrained_model_name_or_path)
     ):
         logger.info("Constructing model from pretrained checkpoint.")
-        rdt = RDTRunner.from_pretrained(args.pretrained_model_name_or_path)
+
+        # Save original dataset config before loading model config
+        dataset_config = config["dataset"] if "dataset" in config else {}
+        common_config = config["common"] if "common" in config else {}
+        
+        # Load model config
+        with open(os.path.join(args.pretrained_model_name_or_path, "config.json"), "r") as f:
+            model_config = json.load(f)
+        
+        # Preserve dataset and common configs if they existed
+        if dataset_config:
+            model_config["dataset"] = dataset_config
+        if common_config:
+            model_config["common"] = common_config
+            
+        config = model_config
+
+        # Create model with required parameters
+        rdt = RDTRunner.from_pretrained(
+            args.pretrained_model_name_or_path,
+            action_dim=config.get("action_dim", 32),  # Use appropriate values
+            pred_horizon=config.get("pred_horizon", 64),
+            config=config,
+            lang_token_dim=config.get("lang_token_dim", 4096),
+            img_token_dim=config.get("img_token_dim", 1152),
+            state_token_dim=config.get("state_token_dim", 32),
+            max_lang_cond_len=config.get("max_lang_cond_len", 256),
+            img_cond_len=config.get("img_cond_len", 18)
+        )
     else:
         logger.info("Constructing model from provided config.")
         # Calculate the image condition length
@@ -179,13 +208,16 @@ def train(args, logger):
         
                                                                        
     ema_rdt = copy.deepcopy(rdt)
+    
+    # Use default EMA values if not found in config
+    ema_config = config.get("model", {}).get("ema", {})
     ema_model = EMAModel(
         ema_rdt,
-        update_after_step=config["model"]["ema"]["update_after_step"],
-        inv_gamma=config["model"]["ema"]["inv_gamma"],
-        power=config["model"]["ema"]["power"],
-        min_value=config["model"]["ema"]["min_value"],
-        max_value=config["model"]["ema"]["max_value"]
+        update_after_step=ema_config.get("update_after_step", 0),
+        inv_gamma=ema_config.get("inv_gamma", 1.0),
+        power=ema_config.get("power", 0.75),
+        min_value=ema_config.get("min_value", 0.0),
+        max_value=ema_config.get("max_value", 0.9999)
     )
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
