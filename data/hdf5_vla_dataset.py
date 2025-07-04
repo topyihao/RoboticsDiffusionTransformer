@@ -18,8 +18,8 @@ class HDF5VLADataset:
     def __init__(self) -> None:
         # [Modify] The path to the HDF5 dataset directory
         # Each HDF5 file contains one episode
-        HDF5_DIR = "data/datasets/put_marker_into_box/"
-        self.DATASET_NAME = "put_marker_into_box"
+        HDF5_DIR = "data/datasets/aloha_dataset"
+        self.DATASET_NAME = "aloha_dataset"
         
         self.file_paths = []
         for root, _, files in os.walk(HDF5_DIR):
@@ -134,24 +134,18 @@ class HDF5VLADataset:
             
             # Load the instruction
             dir_path = os.path.dirname(file_path)
-            instruction_json_path = os.path.join(dir_path, 'expanded_instruction_gpt-4-turbo.json')
-            
-            # Try to load the instruction file, or use a default instruction if it doesn't exist
-            try:
-                with open(instruction_json_path, 'r') as f_instr:
-                    instruction_dict = json.load(f_instr)
-                # We have 1/3 prob to use original instruction,
-                # 1/3 to use simplified instruction,
-                # and 1/3 to use expanded instruction.
-                instruction_type = np.random.choice([
-                    'instruction', 'simplified_instruction', 'expanded_instruction'])
-                instruction = instruction_dict[instruction_type]
-                if isinstance(instruction, list):
-                    instruction = np.random.choice(instruction)
-            except (FileNotFoundError, json.JSONDecodeError):
-                print(f"Instruction file {instruction_json_path} not found or invalid. Using default instruction.")
-                # Use a default instruction
-                instruction = "Put the marker into the box."
+            with open(os.path.join(dir_path, 'expanded_instruction_gpt-4-turbo.json'), 'r') as f_instr:
+                instruction_dict = json.load(f_instr)
+            # We have 1/3 prob to use original instruction,
+            # 1/3 to use simplified instruction,
+            # and 1/3 to use expanded instruction.
+            instruction_type = np.random.choice([
+                'instruction', 'simplified_instruction', 'expanded_instruction'])
+            instruction = instruction_dict[instruction_type]
+            if isinstance(instruction, list):
+                instruction = np.random.choice(instruction)
+            # You can also use precomputed language embeddings (recommended)
+            # instruction = "path/to/lang_embed.pt"
             
             # Assemble the meta
             meta = {
@@ -209,19 +203,9 @@ class HDF5VLADataset:
             
             # Parse the images
             def parse_img(key):
-                # Map between the code's expected camera names and the actual HDF5 dataset camera names
-                camera_name_mapping = {
-                    'cam_high': 'camera_high',
-                    'cam_left_wrist': 'camera_wrist_left',
-                    'cam_right_wrist': 'camera_wrist_right'
-                }
-                
-                # Use the mapped name if it exists, otherwise use the original key
-                hdf5_key = camera_name_mapping.get(key, key)
-                
                 imgs = []
                 for i in range(max(step_id-self.IMG_HISORY_SIZE+1, 0), step_id+1):
-                    img = f['observations']['images'][hdf5_key][i]
+                    img = f['observations']['images'][key][i]
                     imgs.append(cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR))
                 imgs = np.stack(imgs)
                 if imgs.shape[0] < self.IMG_HISORY_SIZE:
